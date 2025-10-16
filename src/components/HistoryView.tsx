@@ -23,6 +23,26 @@ export function HistoryView() {
 
   useEffect(() => {
     loadHistory();
+
+    const channel = supabase
+      .channel('history-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'uploads',
+          filter: `user_id=eq.${user?.id}`,
+        },
+        () => {
+          loadHistory();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [user]);
 
   const loadHistory = async () => {

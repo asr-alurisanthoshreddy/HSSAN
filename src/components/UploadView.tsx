@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Upload, Image as ImageIcon, Loader2, Sparkles } from 'lucide-react';
+import { Upload, Image as ImageIcon, Loader2, Sparkles, MessageCircle, Send } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 
@@ -8,9 +8,22 @@ interface Prediction {
   confidence: number;
 }
 
+interface FlowerInfo {
+  scientific_name: string;
+  common_names: string[];
+  description: string;
+  botanical_properties: any;
+  common_uses: string[];
+  visual_states: any;
+  care_instructions: string;
+  toxicity_info: any;
+  q_and_a: Array<{ question: string; answer: string }>;
+}
+
 interface PredictionResult {
   predictions: Prediction[];
   imageUrl: string;
+  flowerInfo?: FlowerInfo;
 }
 
 export function UploadView() {
@@ -20,6 +33,9 @@ export function UploadView() {
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<PredictionResult | null>(null);
   const [error, setError] = useState('');
+  const [question, setQuestion] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [askingQuestion, setAskingQuestion] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -93,20 +109,98 @@ export function UploadView() {
 
       if (predError) throw predError;
 
-      await supabase
-        .from('uploads')
-        .update({ status: 'completed' })
-        .eq('id', uploadData.id);
+      const topPrediction = predictionData.predictions[0];
+      const scientificName = topPrediction.class_name;
+
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+
+      if (!token) {
+        throw new Error('No authentication token');
+      }
+
+      const classifyResponse = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/classify-flower`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            uploadId: uploadData.id,
+            scientificName,
+          }),
+        }
+      );
+
+      if (!classifyResponse.ok) {
+        throw new Error('Failed to get flower information');
+      }
+
+      const classifyData = await classifyResponse.json();
 
       setResult({
         predictions: predictionData.predictions,
         imageUrl: previewUrl,
+        flowerInfo: classifyData.flowerInfo,
       });
     } catch (err: any) {
       console.error('Upload error:', err);
       setError(err.message || 'Failed to process image');
+
+      await supabase
+        .from('uploads')
+        .update({ status: 'failed' })
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(1);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleAskQuestion = async () => {
+    if (!question.trim() || !result?.flowerInfo || !user) return;
+
+    setAskingQuestion(true);
+    setAnswer('');
+
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+
+      if (!token) {
+        throw new Error('No authentication token');
+      }
+
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ask-question`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            scientificName: result.flowerInfo.scientific_name,
+            question: question.trim(),
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Failed to get answer');
+      }
+
+      const data = await response.json();
+      setAnswer(data.answer);
+      setQuestion('');
+    } catch (err: any) {
+      console.error('Question error:', err);
+      setAnswer(`Error: ${err.message}`);
+    } finally {
+      setAskingQuestion(false);
     }
   };
 
@@ -115,6 +209,8 @@ export function UploadView() {
     setPreviewUrl('');
     setResult(null);
     setError('');
+    setQuestion('');
+    setAnswer('');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -122,7 +218,7 @@ export function UploadView() {
 
   if (result) {
     return (
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-6xl mx-auto">
         <div className="bg-white rounded-2xl shadow-xl overflow-hidden">
           <div className="bg-gradient-to-r from-emerald-500 to-teal-600 p-6">
             <div className="flex items-center gap-3">
@@ -132,8 +228,8 @@ export function UploadView() {
           </div>
 
           <div className="p-6 space-y-6">
-            <div className="flex flex-col md:flex-row gap-6">
-              <div className="md:w-1/2">
+            <div className="flex flex-col lg:flex-row gap-6">
+              <div className="lg:w-1/3">
                 <img
                   src={result.imageUrl}
                   alt="Uploaded flower"
@@ -141,7 +237,7 @@ export function UploadView() {
                 />
               </div>
 
-              <div className="md:w-1/2 space-y-4">
+              <div className="lg:w-2/3 space-y-4">
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">
                   Top Predictions
                 </h3>
@@ -182,6 +278,83 @@ export function UploadView() {
                 ))}
               </div>
             </div>
+
+            {result.flowerInfo && (
+              <div className="border-t pt-6 space-y-6">
+                <div>
+                  <h3 className="text-xl font-bold text-gray-900 mb-2 capitalize">
+                    {result.flowerInfo.scientific_name}
+                  </h3>
+                  {result.flowerInfo.common_names.length > 0 && (
+                    <p className="text-sm text-gray-600 mb-4">
+                      Also known as: {result.flowerInfo.common_names.join(', ')}
+                    </p>
+                  )}
+                  <p className="text-gray-700 leading-relaxed">
+                    {result.flowerInfo.description}
+                  </p>
+                </div>
+
+                {result.flowerInfo.common_uses.length > 0 && (
+                  <div>
+                    <h4 className="font-semibold text-gray-900 mb-2">Common Uses</h4>
+                    <div className="flex flex-wrap gap-2">
+                      {result.flowerInfo.common_uses.map((use, idx) => (
+                        <span
+                          key={idx}
+                          className="px-3 py-1 bg-emerald-50 text-emerald-700 rounded-full text-sm"
+                        >
+                          {use}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {result.flowerInfo.care_instructions && (
+                  <div>
+                    <h4 className="font-semibold text-gray-900 mb-2">Care Instructions</h4>
+                    <p className="text-gray-700 leading-relaxed">
+                      {result.flowerInfo.care_instructions}
+                    </p>
+                  </div>
+                )}
+
+                <div className="border-t pt-6">
+                  <h4 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                    <MessageCircle className="w-5 h-5 text-emerald-600" />
+                    Ask a Question
+                  </h4>
+                  <div className="flex gap-3">
+                    <input
+                      type="text"
+                      value={question}
+                      onChange={(e) => setQuestion(e.target.value)}
+                      onKeyPress={(e) => e.key === 'Enter' && handleAskQuestion()}
+                      placeholder="e.g., Is this flower toxic to dogs?"
+                      className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none"
+                      disabled={askingQuestion}
+                    />
+                    <button
+                      onClick={handleAskQuestion}
+                      disabled={askingQuestion || !question.trim()}
+                      className="px-6 py-2 bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-lg font-semibold hover:from-emerald-600 hover:to-teal-700 transition-all disabled:opacity-50 flex items-center gap-2"
+                    >
+                      {askingQuestion ? (
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                      ) : (
+                        <Send className="w-5 h-5" />
+                      )}
+                    </button>
+                  </div>
+                  {answer && (
+                    <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+                      <p className="text-gray-700 leading-relaxed">{answer}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             <button
               onClick={resetUpload}
