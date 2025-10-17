@@ -176,6 +176,21 @@ export function UploadView() {
     setError('');
 
     try {
+      const predictionData = await detectFlowerFromImage(selectedFile);
+      const topPrediction = predictionData.predictions[0];
+      const scientificName = topPrediction.class_name;
+      const hardcodedInfo = getHardcodedFlowerInfo(scientificName);
+
+      if (hardcodedInfo) {
+        setResult({
+          predictions: predictionData.predictions,
+          imageUrl: previewUrl,
+          flowerInfo: hardcodedInfo,
+        });
+        setUploading(false);
+        return;
+      }
+
       const fileExt = selectedFile.name.split('.').pop();
       const fileName = `${Date.now()}.${fileExt}`;
       const filePath = `${user.id}/${fileName}`;
@@ -198,7 +213,7 @@ export function UploadView() {
 
       if (insertError) throw insertError;
 
-      let predictionData;
+      let apiPredictionData;
       try {
         const formData = new FormData();
         formData.append('file', selectedFile);
@@ -213,13 +228,13 @@ export function UploadView() {
           throw new Error('Backend not available');
         }
 
-        predictionData = await response.json();
+        apiPredictionData = await response.json();
       } catch (backendError) {
-        console.log('Backend unavailable, using image-based detection');
-        predictionData = await detectFlowerFromImage(selectedFile);
+        console.log('Backend unavailable, using fallback detection');
+        apiPredictionData = predictionData;
       }
 
-      const predictions = predictionData.predictions.map((p: any, idx: number) => ({
+      const predictions = apiPredictionData.predictions.map((p: any, idx: number) => ({
         upload_id: uploadData.id,
         predicted_class: p.class_name,
         confidence_score: p.confidence,
@@ -232,48 +247,38 @@ export function UploadView() {
 
       if (predError) throw predError;
 
-      const topPrediction = predictionData.predictions[0];
-      const scientificName = topPrediction.class_name;
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
 
-      const hardcodedInfo = getHardcodedFlowerInfo(scientificName);
-
-      let flowerInfo = hardcodedInfo;
-
-      if (!hardcodedInfo) {
-        const { data: sessionData } = await supabase.auth.getSession();
-        const token = sessionData.session?.access_token;
-
-        if (!token) {
-          throw new Error('No authentication token');
-        }
-
-        const classifyResponse = await fetch(
-          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/classify-flower`,
-          {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              uploadId: uploadData.id,
-              scientificName,
-            }),
-          }
-        );
-
-        if (!classifyResponse.ok) {
-          throw new Error('Failed to get flower information');
-        }
-
-        const classifyData = await classifyResponse.json();
-        flowerInfo = classifyData.flowerInfo;
+      if (!token) {
+        throw new Error('No authentication token');
       }
 
+      const classifyResponse = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/classify-flower`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            uploadId: uploadData.id,
+            scientificName: apiPredictionData.predictions[0].class_name,
+          }),
+        }
+      );
+
+      if (!classifyResponse.ok) {
+        throw new Error('Failed to get flower information');
+      }
+
+      const classifyData = await classifyResponse.json();
+
       setResult({
-        predictions: predictionData.predictions,
+        predictions: apiPredictionData.predictions,
         imageUrl: previewUrl,
-        flowerInfo,
+        flowerInfo: classifyData.flowerInfo,
       });
     } catch (err: any) {
       console.error('Upload error:', err);
